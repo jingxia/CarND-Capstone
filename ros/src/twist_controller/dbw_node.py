@@ -36,7 +36,7 @@ that we have created in the `__init__` function.
 class DBWNode(object):
     def __init__(self):
         rospy.init_node('dbw_node')
-
+        
         vehicle_mass = rospy.get_param('~vehicle_mass', 1736.35)
         fuel_capacity = rospy.get_param('~fuel_capacity', 13.5)
         brake_deadband = rospy.get_param('~brake_deadband', .1)
@@ -47,15 +47,13 @@ class DBWNode(object):
         steer_ratio = rospy.get_param('~steer_ratio', 14.8)
         max_lat_accel = rospy.get_param('~max_lat_accel', 3.)
         max_steer_angle = rospy.get_param('~max_steer_angle', 8.)
-
-        self.steer_pub = rospy.Publisher('/vehicle/steering_cmd',
-                                         SteeringCmd, queue_size=1)
-        self.throttle_pub = rospy.Publisher('/vehicle/throttle_cmd',
-                                            ThrottleCmd, queue_size=1)
-        self.brake_pub = rospy.Publisher('/vehicle/brake_cmd',
-                                         BrakeCmd, queue_size=1)
-
-        # TODO: Create `Controller` object
+        
+        self.steer_pub = rospy.Publisher('/vehicle/steering_cmd', SteeringCmd, queue_size = 1)
+        self.throttle_pub = rospy.Publisher('/vehicle/throttle_cmd', ThrottleCmd, queue_size = 1)
+        self.brake_pub = rospy.Publisher('/vehicle/brake_cmd', BrakeCmd, queue_size = 1)
+        
+        # TODO: Create `TwistController` object
+        # self.controller = TwistController(<Arguments you wish to provide>)
         config = {
             'vehicle_mass': vehicle_mass,
             'fuel_capacity': fuel_capacity,
@@ -83,20 +81,17 @@ class DBWNode(object):
         self.dbw_sub = rospy.Subscriber('/vehicle/dbw_enabled', Bool, self.dbw_enabled_callback, queue_size = 1)
         self.final_wp_sub = rospy.Subscriber('final_waypoints', Lane, self.final_waypoints_cb, queue_size = 1)
         self.pose_sub = rospy.Subscriber('/current_pose', PoseStamped, self.current_pose_cb, queue_size = 1)
-       
-
+        
         self.loop()
-
+    
+    
     def loop(self):
         rate = rospy.Rate(50) # 50Hz
         while not rospy.is_shutdown():
             # TODO: Get predicted throttle, brake, and steering using `twist_controller`
             # You should only publish the control commands if dbw is enabled
-            # throttle, brake, steering = self.controller.control(<proposed linear velocity>,
-            #                                                     <proposed angular velocity>,
-            #                                                     <current linear velocity>,
-            #                                                     <dbw status>,
-            #                                                     <any other argument you need>)
+            # throttle, brake, steering = self.controller.control(<proposed linear velocity>, <proposed angular velocity>,
+            #                                                     <current linear velocity>, <dbw status>, <any other argument you need>)
             # if <dbw is enabled>:
             #   self.publish(throttle, brake, steer)
             if (self.current_velocity is not None) and (self.proposed_velocity is not None) and (self.final_waypoints is not None):
@@ -120,34 +115,36 @@ class DBWNode(object):
                 We will transform world coordinates to car coordinates so that all x values are in the direction of the car and
 		        all y values represent lateral movement
                 """
-                origin = self.final_waypoints[0].pose.pose.position
                 
+                origin = self.final_waypoints[0].pose.pose.position
+
                 # Given a list of waypoints, returns a list of [x,y] coordinates associated with those wp.
                 wp_matrix = list(map(lambda waypoint: [waypoint.pose.pose.position.x, waypoint.pose.pose.position.y], self.final_waypoints))
-                
+
                 # Convert the coordinates [x,y] in the world view to the car's coordinate.
                 # Shift the points to the origin.
                 shifted_matrix = wp_matrix - np.array([origin.x, origin.y])
-                
+
                 # Derive an angle by which to rotate the points.
                 offset = 11
                 angle = np.arctan2(shifted_matrix[offset, 1], shifted_matrix[offset, 0])
+
                 rotation_matrix = np.array([[np.cos(angle), -np.sin(angle)],
                                             [np.sin(angle), np.cos(angle)]])
-                
+
                 rotated_matrix = np.dot(shifted_matrix, rotation_matrix)
-                
+
                 # Fit a 2 degree polynomial to the waypoints.
                 degree = 2
                 coefficients = np.polyfit(rotated_matrix[:, 0], rotated_matrix[:, 1], degree)
-                
+
                 # Transform the current pose of the car to be in the car's coordinate system.
                 shifted_pose = np.array([self.current_pose.pose.position.x - origin.x, self.current_pose.pose.position.y - origin.y])
                 rotated_pose = np.dot(shifted_pose, rotation_matrix)
-                
+
                 expected_y_value = np.polyval(coefficients, rotated_pose[0])
                 actual_y_value = rotated_pose[1]
-                
+
                 cross_track_err = expected_y_value - actual_y_value
                 
                 throttle, brake, steering = self.controller.control(targ_lin_vel, targ_ang_vel, curr_lin_vel, cross_track_err, dura_secs)
@@ -157,8 +154,29 @@ class DBWNode(object):
                 
                 if self.is_dbw_enabled:
                     self.publish(throttle, brake, steering)
+            
             rate.sleep()
-
+    
+    
+    def publish(self, throttle, brake, steer):
+        tcmd = ThrottleCmd()
+        tcmd.enable = True
+        tcmd.pedal_cmd_type = ThrottleCmd.CMD_PERCENT
+        tcmd.pedal_cmd = throttle
+        self.throttle_pub.publish(tcmd)
+        
+        scmd = SteeringCmd()
+        scmd.enable = True
+        scmd.steering_wheel_angle_cmd = steer
+        self.steer_pub.publish(scmd)
+        
+        bcmd = BrakeCmd()
+        bcmd.enable = True
+        bcmd.pedal_cmd_type = BrakeCmd.CMD_TORQUE
+        bcmd.pedal_cmd = brake
+        self.brake_pub.publish(bcmd)
+    
+    
     def twist_message_callback(self, mesg):
         self.proposed_velocity = mesg
     
@@ -178,24 +196,6 @@ class DBWNode(object):
     
     def current_pose_cb(self, mesg):
         self.current_pose = mesg
-        
-    def publish(self, throttle, brake, steer):
-        tcmd = ThrottleCmd()
-        tcmd.enable = True
-        tcmd.pedal_cmd_type = ThrottleCmd.CMD_PERCENT
-        tcmd.pedal_cmd = throttle
-        self.throttle_pub.publish(tcmd)
-
-        scmd = SteeringCmd()
-        scmd.enable = True
-        scmd.steering_wheel_angle_cmd = steer
-        self.steer_pub.publish(scmd)
-
-        bcmd = BrakeCmd()
-        bcmd.enable = True
-        bcmd.pedal_cmd_type = BrakeCmd.CMD_TORQUE
-        bcmd.pedal_cmd = brake
-        self.brake_pub.publish(bcmd)
 
 
 if __name__ == '__main__':
